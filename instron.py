@@ -74,6 +74,8 @@ st.title("Instron Post-Processing Tool")
 
 uploaded_files = st.file_uploader("Upload Instron CSV files", type=["csv"], accept_multiple_files=True, key="uploader_instron")
 
+
+
 if not uploaded_files:
     st.info("📂 Please upload one or more CSV files to continue.")
     st.stop()
@@ -130,7 +132,7 @@ with tab_graph:
     st.subheader("Stress vs Strain — pick curves to plot")
 
     # 1) Metric selector: Stress or MSV
-    metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, help="Plot raw Stress vs Strain, or MSV vs Strain")
+    metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True)
 
     filenames = sorted(processed.keys())
     select_all = st.checkbox("Select All Files", value=True)
