@@ -307,7 +307,7 @@ with tab_comp:
 
     # Once every mix has a selection, plot them together
     if len(compare) == len([k for k in uploads if uploads[k]]):
-        fig, ax = plt.subplots(figsize=(4.7, 4.7), constrained_layout=True)        
+        fig, ax = plt.subplots(figsize=(4.4, 4.4), constrained_layout=True)        
         ax.set_box_aspect(1)
         palette = plt.get_cmap("tab20").colors
 
