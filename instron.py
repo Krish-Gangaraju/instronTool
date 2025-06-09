@@ -6,6 +6,8 @@ from matplotlib.ticker import LogLocator, LogFormatter, FuncFormatter
 from io import StringIO
 import io
 import streamlit as st
+import matplotlib.backends.backend_pdf as bpdf
+
 
 # ——— Custom CSS for tighter spacing around checkboxes & text inputs ———
 st.set_page_config(page_title="Instron Post-Processing Tool", layout="wide")
@@ -91,7 +93,7 @@ num_mixes = st.number_input("Enter number of mixes:", min_value=1, max_value=20,
 uploads = {}
 for i in range(1, num_mixes+1):
     mix_key = f"Mix{i}"
-    files = st.file_uploader(f"{mix_key}: upload sample CSV files", type=["csv"], accept_multiple_files=True, key=f"uploader_{mix_key}")
+    files = st.file_uploader(f"**{mix_key}: upload sample CSV files**", type=["csv"], accept_multiple_files=True, key=f"uploader_{mix_key}")
     uploads[mix_key] = files
 
 
@@ -133,63 +135,153 @@ tab_graph, tab_comp, tab_key = st.tabs(["Graph Interface", "Comparison Interace"
 
 
 # right before you loop over mixes, define your sizes
-TITLE_FS = 9
-LABEL_FS = 8
-TICK_FS  = 6
-LEGEND_FS = 6
-LEGEND_TITLE_FS = 7
+TITLE_FS = 7
+LABEL_FS = 6
+TICK_FS  = 5
+LEGEND_FS = 4
+LEGEND_TITLE_FS = 5
 LINEWIDTH = 1.5
 
 with tab_graph:
     st.subheader("Stress vs Strain — pick curves to plot")
 
-    metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, key="metric_graph")
+    col1, col2, col3 = st.columns([1, 1, 1], gap="small")
+    with col1:
+        metric = st.radio(
+            "Metric",
+            ["Stress", "MSV"],
+            horizontal=True,
+            key="metric_graph"
+        )
+    with col2:
+        label_mode = st.radio(
+            "Legend labels",
+            ["Filename", "Nickname"],
+            horizontal=True,
+            key="label_mode"
+        )
+    with col3:
+        if st.button("📄 Download all as PDF"):
+            # Generate a PDF in memory
+            pdf_buffer = io.BytesIO()
+            with bpdf.PdfPages(pdf_buffer) as pdf:
+                for mix_key, files in uploads.items():
+                    if not files:
+                        continue
+                    # recreate the same square figure per mix
+                    fig, ax = plt.subplots(figsize=(3.7, 3.7), constrained_layout=True)
+                    ax.set_box_aspect(1)
+                    for idx, f in enumerate(files):
+                        df = clean_instron_file(f)
+                        x = df[chosen_strain]
+                        if metric == "Stress":
+                            y = df[chosen_stress]
+                        else:
+                            eps = df[chosen_strain].replace(0, np.nan) / 100
+                            cond = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
+                            y = pd.Series(np.nan, index=df.index)
+                            y.loc[cond] = (
+                                df.loc[cond, chosen_stress] / eps.loc[cond]
+                                + df.loc[cond, chosen_stress]
+                            )
+                        lbl = f.name if label_mode=="Filename" else f"{mix_key} - Sample{idx+1}"
+                        ax.plot(
+                            x, y,
+                            color=plt.get_cmap("tab20").colors[idx % 20],
+                            label=lbl, linewidth=LINEWIDTH
+                        )
+                    ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
+                    ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
+                    ax.set_ylabel(
+                        chosen_stress if metric=="Stress" else "MSV (MPa)",
+                        fontsize=LABEL_FS
+                    )
+                    ax.tick_params(labelsize=TICK_FS)
+                    handles, labels = ax.get_legend_handles_labels()
+                    pairs = sorted(zip(labels, handles), key=lambda x: x[0])
+                    sl, sh = zip(*pairs)
+                    ax.legend(
+                        sh, sl, title="Samples",
+                        fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
+                        loc="upper left"
+                    )
+                    pdf.savefig(fig)
+                    plt.close(fig)
+            pdf_buffer.seek(0)
+            st.download_button(
+                "⬇️ Download PDF",
+                data=pdf_buffer,
+                file_name="instron_all_mixes.pdf",
+                mime="application/pdf"
+            )
+
+    st.markdown("---")
+
+
+
 
     for mix_key, files in uploads.items():
-        if not files: continue
-        # st.markdown(f"### {mix_key}")
+        if not files:
+            continue
 
         # square figure
-        fig, ax = plt.subplots(figsize=(6,6))
+        fig, ax = plt.subplots(figsize=(3.5, 3.5), constrained_layout=True)
         ax.set_box_aspect(1)
 
         # plotting
         for idx, f in enumerate(files):
             df = clean_instron_file(f)
             x = df[chosen_strain]
-            if metric=="Stress":
+            if metric == "Stress":
                 y = df[chosen_stress]
             else:
-                eps = df[chosen_strain].replace(0,np.nan)/100
-                cond = (df[chosen_stress]>0)&(df["Displacement (mm)"]>1)
+                eps = df[chosen_strain].replace(0, np.nan) / 100
+                cond = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
                 y = pd.Series(np.nan, index=df.index)
-                y.loc[cond] = df.loc[cond,chosen_stress]/eps.loc[cond] + df.loc[cond,chosen_stress]
-            ax.plot(x, y, color=plt.get_cmap("tab20").colors[idx%20], label=f.name, linewidth=LINEWIDTH)
+                y.loc[cond] = (
+                    df.loc[cond, chosen_stress] / eps.loc[cond]
+                    + df.loc[cond, chosen_stress]
+                )
+            # choose legend label based on mode
+            if label_mode == "Filename":
+                lbl = f.name
+            else:
+                lbl = f"{mix_key} - Sample{idx+1}"
+
+            ax.plot(x, y, color=plt.get_cmap("tab20").colors[idx % 20], label=lbl, linewidth=LINEWIDTH)
 
         # apply font sizes
         ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
         ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
-        ax.set_ylabel(chosen_stress if metric=="Stress" else "MSV (MPa)", fontsize=LABEL_FS)
+        ax.set_ylabel(
+            chosen_stress if metric == "Stress" else "MSV (MPa)",
+            fontsize=LABEL_FS
+        )
 
         # ticks
         ax.tick_params(axis="both", which="major", labelsize=TICK_FS)
 
-        # legend
+        # sort and draw legend
         handles, labels = ax.get_legend_handles_labels()
         pairs = sorted(zip(labels, handles), key=lambda x: x[0])
         sorted_labels, sorted_handles = zip(*pairs)
 
-        ax.legend(sorted_handles, sorted_labels,
+        leg = ax.legend(
+            sorted_handles,
+            sorted_labels,
             title="Samples",
             fontsize=LEGEND_FS,
             title_fontsize=LEGEND_TITLE_FS,
-            bbox_to_anchor=(1.02, 1),
-            loc="upper left"
+            loc="upper left",
+            frameon=True,
+            edgecolor="black",
         )
+        leg.get_frame().set_linewidth(0.5)
 
         plt.tight_layout()
-        st.pyplot(fig)
+        st.pyplot(fig, use_container_width=False)
         st.markdown("---")
+
 
 
 
@@ -215,7 +307,7 @@ with tab_comp:
 
     # Once every mix has a selection, plot them together
     if len(compare) == len([k for k in uploads if uploads[k]]):
-        fig, ax = plt.subplots(figsize=(6, 6))
+        fig, ax = plt.subplots(figsize=(4.7, 4.7), constrained_layout=True)        
         ax.set_box_aspect(1)
         palette = plt.get_cmap("tab20").colors
 
@@ -248,15 +340,17 @@ with tab_comp:
         handles, labels = ax.get_legend_handles_labels()
         pairs = sorted(zip(labels, handles), key=lambda x: x[0])
         sorted_labels, sorted_handles = zip(*pairs)
-        ax.legend(
+        leg = ax.legend(
             sorted_handles,
             sorted_labels,
-            title="Mix sample",
+            title="Samples",
             fontsize=LEGEND_FS,
             title_fontsize=LEGEND_TITLE_FS,
-            bbox_to_anchor=(1.02, 1),
-            loc="upper left"
+            loc="upper left",
+            frameon=True,
+            edgecolor="black",
         )
+        leg.get_frame().set_linewidth(0.5)
 
         ax.set_title(f"Comparison: {metric} vs Strain", fontsize=TITLE_FS)
         ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
@@ -266,7 +360,7 @@ with tab_comp:
         )
         ax.tick_params(labelsize=TICK_FS)
         plt.tight_layout()
-        st.pyplot(fig)
+        st.pyplot(fig, use_container_width=False)
 
     else:
         st.info("✅ Please select one sample for each mix to compare.")
