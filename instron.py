@@ -7,41 +7,45 @@ from io import StringIO
 import io
 import streamlit as st
 
-
 # ——— Custom CSS for tighter spacing around checkboxes & text inputs ———
 st.set_page_config(page_title="Instron Post-Processing Tool", layout="wide")
 
-st.markdown(
-    """
-    <style>
-      /* Reduce bottom margin on each checkbox container */
-      .stCheckbox {
-        margin-bottom: 4px !important;
-        padding-bottom: 0px !important;
-      }
-      /* Reduce top margin on each text input container */
-      .stTextInput {
-        margin-top: 0px !important;
-        margin-bottom: 12px !important;
-      }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+  /* Reduce bottom margin on each checkbox container */
+  .stCheckbox {
+    margin-bottom: 4px !important;
+    padding-bottom: 0px !important;
+  }
+  /* Reduce top margin on each text input container */
+  .stTextInput {
+    margin-top: 0px !important;
+    margin-bottom: 12px !important;
+  }
+</style>
+""", unsafe_allow_html=True)
 
 
 def _load_instron_csv(buffer):
     """
-    Read a CSV‐style buffer that may have arbitrary preamble lines.
+    Read a CSV style buffer that may have arbitrary preamble lines.
     We scan line by line until we see a line beginning with "Time" (case-sensitive).
     Everything from that line onward is passed to pandas.read_csv.
     """
+    # Rewind buffer to the start so repeated reads work
+    if hasattr(buffer, "seek"):
+        buffer.seek(0)
+
+    # Read raw bytes or text lines
     raw = buffer.readlines() if hasattr(buffer, "readlines") else open(buffer, "rb").readlines()
+
+    # Decode each line into a Python string
     lines = [
         L.decode("utf-8", errors="replace") if isinstance(L, (bytes, bytearray)) else L
         for L in raw
     ]
 
+    # Find the first line that starts with "Time"
     header_idx = None
     for i, line in enumerate(lines):
         if line.strip().startswith("Time"):
@@ -51,9 +55,10 @@ def _load_instron_csv(buffer):
     if header_idx is None:
         raise ValueError("Could not find a header row starting with 'Time' in the uploaded file.")
 
-    data_str = "".join(lines[header_idx+1:])
-    df = pd.read_csv(StringIO(data_str))
-    return df
+    # Build a single string containing that header line + all lines below it
+    data_str = "".join(lines[header_idx + 1 :])
+    # Let pandas read it (it will infer column names from the header row we skipped)
+    return pd.read_csv(StringIO(data_str))
 
 
 @st.cache_data
@@ -62,258 +67,250 @@ def clean_instron_file(buffer):
     1) Load buffer into a pandas DataFrame by scanning for the "Time" header.
     2) Convert every column to numeric (coercing errors → NaN).
     """
+    # This will rewind and load the CSV content
     df = _load_instron_csv(buffer)
+
+    # Rename to your desired columns
     df.columns = ["Time (s)", "Force (kN)", "Displacement (mm)", "Strain (%)", "Stress (MPa)"]
+
+    # Ensure everything is numeric
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
     return df
+
 
 
 st.title("Instron Post-Processing Tool")
 
 
-uploaded_files = st.file_uploader("Upload Instron CSV files", type=["csv"], accept_multiple_files=True, key="uploader_instron")
+
+# ——— 1) Define mixes & upload samples ———
+num_mixes = st.number_input("Enter number of mixes:", min_value=1, max_value=20, step=1, value=1)
+
+uploads = {}
+for i in range(1, num_mixes+1):
+    mix_key = f"Mix{i}"
+    files = st.file_uploader(f"{mix_key}: upload sample CSV files", type=["csv"], accept_multiple_files=True, key=f"uploader_{mix_key}")
+    uploads[mix_key] = files
 
 
 
-if not uploaded_files:
-    st.info("📂 Please upload one or more CSV files to continue.")
+# Ensure at least one file in at least one mix
+if not any(uploads.values()):
+    st.info("📂 Please upload at least one CSV file for each mix to continue.")
     st.stop()
 
-# Process each file and store in a dict: filename → DataFrame
-processed = {}
-for uploaded in uploaded_files:
-    try:
-        df_clean = clean_instron_file(uploaded)
-        processed[uploaded.name] = df_clean
-    except Exception as e:
-        st.error(f"⚠️ Failed to process **{uploaded.name}**: {e}")
+# ——— 2) Choose columns X and Y ———
+# Process all uploaded to get column candidates
+processed_tmp = {}
+for mix_key, files in uploads.items():
+    for f in files or []:
+        try:
+            processed_tmp[f.name] = clean_instron_file(f)
+        except:
+            pass
 
-if not processed:
-    st.stop()
-
-# Gather all column names (lowercased) across all DataFrames to detect strain/stress candidates
-all_columns = set()
-for df in processed.values():
-    all_columns.update(df.columns.tolist())
-
+all_columns = set().union(*(df.columns.tolist() for df in processed_tmp.values()))
 strain_candidates = [c for c in all_columns if "strain" in c.lower()]
 stress_candidates = [c for c in all_columns if "stress" in c.lower()]
 
-if not strain_candidates:
-    st.error("❌ No column containing “strain” was found in any uploaded file.")
-    st.stop()
-if not stress_candidates:
-    st.error("❌ No column containing “stress” was found in any uploaded file.")
+if not strain_candidates or not stress_candidates:
+    st.error("❌ Could not detect both strain & stress columns.")
     st.stop()
 
-if len(strain_candidates) == 1:
-    chosen_strain = strain_candidates[0]
-else:
-    chosen_strain = st.selectbox(
-        "Multiple “strain” columns detected. Please choose which one to use for X:",
-        options=sorted(strain_candidates),
-    )
+chosen_strain = strain_candidates[0] if len(strain_candidates)==1 else st.selectbox(
+    "Choose X (strain) column:",
+    sorted(strain_candidates)
+)
+chosen_stress = stress_candidates[0] if len(stress_candidates)==1 else st.selectbox(
+    "Choose Y (stress) column:",
+    sorted(stress_candidates)
+)
 
-if len(stress_candidates) == 1:
-    chosen_stress = stress_candidates[0]
-else:
-    chosen_stress = st.selectbox(
-        "Multiple “stress” columns detected. Please choose which one to use for Y:",
-        options=sorted(stress_candidates),
-    )
-
-tab_graph, tab_key, tab_data = st.tabs(["Graph Interface", "Key Values", "Data Interface"])
+tab_graph, tab_comp, tab_key = st.tabs(["Graph Interface", "Comparison Interace", "Key Values"])
 
 
 
+# right before you loop over mixes, define your sizes
+TITLE_FS = 9
+LABEL_FS = 8
+TICK_FS  = 6
+LEGEND_FS = 6
+LEGEND_TITLE_FS = 7
+LINEWIDTH = 1.5
 
 with tab_graph:
     st.subheader("Stress vs Strain — pick curves to plot")
 
-    # 1) Metric selector: Stress or MSV
-    metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True)
+    metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, key="metric_graph")
 
-    filenames = sorted(processed.keys())
-    select_all = st.checkbox("Select All Files", value=True)
+    for mix_key, files in uploads.items():
+        if not files: continue
+        # st.markdown(f"### {mix_key}")
 
-    files_to_plot = []
-    display_names = {}
+        # square figure
+        fig, ax = plt.subplots(figsize=(6,6))
+        ax.set_box_aspect(1)
 
-    # Helper to chunk filenames into rows of 3
-    def chunk_list(lst, n):
-        for i in range(0, len(lst), n):
-            yield lst[i : i + n]
+        # plotting
+        for idx, f in enumerate(files):
+            df = clean_instron_file(f)
+            x = df[chosen_strain]
+            if metric=="Stress":
+                y = df[chosen_stress]
+            else:
+                eps = df[chosen_strain].replace(0,np.nan)/100
+                cond = (df[chosen_stress]>0)&(df["Displacement (mm)"]>1)
+                y = pd.Series(np.nan, index=df.index)
+                y.loc[cond] = df.loc[cond,chosen_stress]/eps.loc[cond] + df.loc[cond,chosen_stress]
+            ax.plot(x, y, color=plt.get_cmap("tab20").colors[idx%20], label=f.name, linewidth=LINEWIDTH)
 
-    for row_files in chunk_list(filenames, 3):
-        cols = st.columns(3)
-        for idx, fname in enumerate(row_files):
-            with cols[idx]:
-                checked = st.checkbox(f"*{fname}*", value=select_all, key=f"cb_{fname}")
-                new_label = st.text_input("Rename for plot (optional)", value=fname, key=f"rename_{fname}")
+        # apply font sizes
+        ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
+        ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
+        ax.set_ylabel(chosen_stress if metric=="Stress" else "MSV (MPa)", fontsize=LABEL_FS)
 
-                if checked:
-                    files_to_plot.append(fname)
-                    display_names[fname] = new_label
+        # ticks
+        ax.tick_params(axis="both", which="major", labelsize=TICK_FS)
 
-        # Small gap after each row
-        st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
+        # legend
+        handles, labels = ax.get_legend_handles_labels()
+        pairs = sorted(zip(labels, handles), key=lambda x: x[0])
+        sorted_labels, sorted_handles = zip(*pairs)
 
-        # Placeholders if fewer than 3 files
-        for empty_idx in range(len(row_files), 3):
-            with cols[empty_idx]:
-                st.write("")
+        ax.legend(sorted_handles, sorted_labels,
+            title="Samples",
+            fontsize=LEGEND_FS,
+            title_fontsize=LEGEND_TITLE_FS,
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left"
+        )
 
-    if not files_to_plot:
-        st.info("✅ Please select at least one file to plot.")
-    else:
-        fig, ax = plt.subplots(figsize=(12, 6))
+        plt.tight_layout()
+        st.pyplot(fig)
+        st.markdown("---")
 
+
+
+
+with tab_comp:
+    st.subheader("Comparison — select representative samples per mix")
+
+    # Allow user to pick one sample per mix
+    compare = {}
+    for mix_key, files in uploads.items():
+        if not files:
+            continue
+        options = [f.name for f in files]
+        sel = st.selectbox(
+            f"{mix_key} sample to compare",
+            options,
+            key=f"comp_{mix_key}"
+        )
+        compare[mix_key] = sel
+
+    # Metric radio (same as in graph)
+    metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, key="comp_metric")
+
+    # Once every mix has a selection, plot them together
+    if len(compare) == len([k for k in uploads if uploads[k]]):
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.set_box_aspect(1)
         palette = plt.get_cmap("tab20").colors
-        color_map = {f: palette[i % len(palette)] for i, f in enumerate(filenames)}
 
-        plotted_any = False
-        for name in files_to_plot:
-            df = processed[name]
-
-            # Ensure required columns exist
-            if chosen_strain not in df.columns or chosen_stress not in df.columns or "Displacement (mm)" not in df.columns:
-                continue
-
-            x = df[chosen_strain]  # Strain (%)
-
+        for idx, mix_key in enumerate(compare):
+            fname = compare[mix_key]
+            # find the corresponding UploadedFile object
+            fobj = next(f for f in uploads[mix_key] if f.name == fname)
+            df = clean_instron_file(fobj)
+            x = df[chosen_strain]
             if metric == "Stress":
                 y = df[chosen_stress]
-
             else:
-                # 1) Convert Strain (%) -> decimal, avoid zero division
-                epsilon = df[chosen_strain].replace(0, np.nan) / 100.0
-
-                # 2) Compute MSV only where Stress>0 and Displacement>1; else NaN
-                cond_valid = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
+                eps = df[chosen_strain].replace(0, np.nan) / 100.0
+                cond = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
                 y = pd.Series(np.nan, index=df.index)
-                y.loc[cond_valid] = (
-                    df.loc[cond_valid, chosen_stress] / epsilon.loc[cond_valid]
-                    + df.loc[cond_valid, chosen_stress]
+                y.loc[cond] = (
+                    df.loc[cond, chosen_stress] / eps.loc[cond]
+                    + df.loc[cond, chosen_stress]
                 )
 
-            label_to_use = display_names.get(name, name)
-            ax.plot(x, y, color=color_map[name], label=label_to_use, linewidth=1.5)
-            plotted_any = True
+            ax.plot(
+                x,
+                y,
+                color=palette[idx % len(palette)],
+                label=f"{mix_key}: {fname}",
+                linewidth=LINEWIDTH
+            )
 
-        if not plotted_any:
-            st.warning("No valid data found for the selected metric (Stress or MSV).")
-        else:
-            ax.set_title(f"Instron Test: {metric} vs Strain")
-            ax.set_xlabel(chosen_strain)  # "Strain (%)"
-            if metric == "Stress":
-                ax.set_ylabel(chosen_stress)  # "Stress (MPa)"
-            else:
-                ax.set_ylabel("MSV (MPa)")
-            plt.setp(ax.get_xticklabels(), rotation=45)
-            ax.legend(title="Mixes", bbox_to_anchor=(1.02, 1), loc="upper left")
-            plt.tight_layout()
-            st.pyplot(fig)
+        # sort legend
+        handles, labels = ax.get_legend_handles_labels()
+        pairs = sorted(zip(labels, handles), key=lambda x: x[0])
+        sorted_labels, sorted_handles = zip(*pairs)
+        ax.legend(
+            sorted_handles,
+            sorted_labels,
+            title="Mix sample",
+            fontsize=LEGEND_FS,
+            title_fontsize=LEGEND_TITLE_FS,
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left"
+        )
 
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
-            buf.seek(0)
-            st.download_button("Download plot as PNG", data=buf, file_name=f"instron_{metric.lower()}_vs_strain.png", mime="image/png")
+        ax.set_title(f"Comparison: {metric} vs Strain", fontsize=TITLE_FS)
+        ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
+        ax.set_ylabel(
+            chosen_stress if metric == "Stress" else "MSV (MPa)",
+            fontsize=LABEL_FS
+        )
+        ax.tick_params(labelsize=TICK_FS)
+        plt.tight_layout()
+        st.pyplot(fig)
+
+    else:
+        st.info("✅ Please select one sample for each mix to compare.")
 
 
 
 
 
 with tab_key:
-    st.subheader("Key Values — Assign Mixes & Compute Failure Points")
+    st.subheader("Failure & M-Point Averages by Mix")
 
-    # 1) Let user specify how many mixes
-    num_mixes = st.number_input("Enter number of mixes:", min_value=1, max_value=len(processed), step=1, value=1)
+    results = {}
+    def stress_at_strain(df, target):
+        idx = (df[chosen_strain] - target).abs().idxmin()
+        return df[chosen_stress].iloc[idx]
 
-    # 2) For each mix, allow the user to select which files belong to that mix,
-    #    enforcing that no file can appear in more than one mix.
-    mix_assignments = {}
-    filenames = sorted(processed.keys())
-    available = set(filenames)
+    for mix_key, files in uploads.items():
+        if not files:
+            continue
+        fs, fr = [], []
+        m2, m10, m100, m300 = [], [], [], []
+        for f in files:
+            df = clean_instron_file(f)
+            idx_max = df[chosen_stress].idxmax()
+            fs.append(df[chosen_stress].iloc[idx_max])
+            fr.append(df[chosen_strain].iloc[idx_max])
+            m2.append(stress_at_strain(df, 2.0))
+            m10.append(stress_at_strain(df, 10.0))
+            m100.append(stress_at_strain(df, 100.0))
+            m300.append(stress_at_strain(df, 300.0))
+        results[mix_key] = [
+            np.mean(fs), np.mean(fr),
+            np.mean(m2), np.mean(m10), np.mean(m100), np.mean(m300)
+        ]
 
-    for i in range(int(num_mixes)):
-        mix_key = f"Mix{i+1}"
-        mix_prompt = f"{mix_key} - select samples"
-        options = sorted(available)
-        selected = st.multiselect(mix_prompt, options=options, default=[], key=f"mix_sel_{i}")
-        for s in selected:
-            if s in available:
-                available.remove(s)
-        mix_assignments[mix_key] = selected
-
-    # 3) Compute average failure stress & strain + M2, M10, M100, M300 for each mix
-    if st.button("Compute Values"):
-        failure_averages = {}
-
-        # Helper to find stress at a given target strain (nearest point)
-        def stress_at_strain(df, target_strain):
-            if chosen_strain not in df.columns or chosen_stress not in df.columns:
-                return np.nan
-            idx = (df[chosen_strain] - target_strain).abs().idxmin()
-            return df[chosen_stress].iloc[idx]
-
-        for mix_key, file_list in mix_assignments.items():
-            failure_stresses = []
-            failure_strains = []
-            m2_list = []
-            m10_list = []
-            m100_list = []
-            m300_list = []
-
-            for fname in file_list:
-                df = processed[fname]
-                if chosen_stress not in df.columns or chosen_strain not in df.columns:
-                    continue
-
-                # Failure: max stress and corresponding strain
-                max_idx = df[chosen_stress].idxmax()
-                failure_stresses.append(df[chosen_stress].iloc[max_idx])
-                failure_strains.append(df[chosen_strain].iloc[max_idx])
-
-                # M2, M10, M100, M300 (stress at those strain percentages)
-                m2_list.append(stress_at_strain(df, 2.0))
-                m10_list.append(stress_at_strain(df, 10.0))
-                m100_list.append(stress_at_strain(df, 100.0))
-                m300_list.append(stress_at_strain(df, 300.0))
-
-            avg_failure_stress = np.mean(failure_stresses) if failure_stresses else np.nan
-            avg_failure_strain = np.mean(failure_strains) if failure_strains else np.nan
-            avg_m2 = np.mean(m2_list) if m2_list else np.nan
-            avg_m10 = np.mean(m10_list) if m10_list else np.nan
-            avg_m100 = np.mean(m100_list) if m100_list else np.nan
-            avg_m300 = np.mean(m300_list) if m300_list else np.nan
-
-            failure_averages[mix_key] = {
-                "M2 (MPa)": avg_m2,
-                "M10 (MPa)": avg_m10,
-                "M100 (MPa)": avg_m100,
-                "M300 (MPa)": avg_m300,
-                "Failure Stress (MPa)": avg_failure_stress,
-                "Failure Strain (%)": avg_failure_strain
-            }
-
-        # Build DataFrame: columns = Mix1, Mix2, …, rows = metrics
-        df_avgs = pd.DataFrame(
-            {mix_key: list(vals.values()) for mix_key, vals in failure_averages.items()},
-            index=list(next(iter(failure_averages.values())).keys())
-        )
-
-        st.write("### Failure & M-Point Averages by Mix")
-        st.dataframe(df_avgs, use_container_width=True)
-
-
-
-
-
-
-with tab_data:
-    st.subheader("Inspect the Cleaned DataFrames")
-    for filename, df in processed.items():
-        st.markdown(f"**{filename}**")
-        st.dataframe(df.head(10), use_container_width=True)
-        st.markdown("---")
+    df_avgs = pd.DataFrame(
+        results,
+        index=[
+            "Failure Stress (MPa)",
+            "Failure Strain (%)",
+            "M2 (MPa)",
+            "M10 (MPa)",
+            "M100 (MPa)",
+            "M300 (MPa)"
+        ]
+    )
+    st.dataframe(df_avgs, use_container_width=True)
