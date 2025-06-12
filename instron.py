@@ -304,8 +304,8 @@ tab_graph, tab_comp, tab_key = st.tabs(["Graph Interface", "Comparison Interace"
 TITLE_FS = 7
 LABEL_FS = 6
 TICK_FS  = 5
-LEGEND_FS = 5
-LEGEND_TITLE_FS = 6
+LEGEND_FS = 4.3
+LEGEND_TITLE_FS = 5.5
 LINEWIDTH = 1.5
 
 with tab_graph:
