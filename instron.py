@@ -9,6 +9,70 @@ import streamlit as st
 import matplotlib.backends.backend_pdf as bpdf
 
 
+
+
+
+def download_all_plots_as_pdf():
+    """
+    Generates a multipage PDF of all mix plots using the same logic
+    you had in col3, and returns an in-memory BytesIO buffer.
+    """
+    pdf_buffer = io.BytesIO()
+    with bpdf.PdfPages(pdf_buffer) as pdf:
+        for mix_key, files in uploads.items():
+            if not files:
+                continue
+            fig, ax = plt.subplots(figsize=(3.7, 3.7), constrained_layout=True)
+            ax.set_box_aspect(1)
+            for idx, f in enumerate(files):
+                df = clean_instron_file(f)
+                x = df[chosen_strain]
+                if metric == "Stress":
+                    y = df[chosen_stress]
+                else:
+                    eps = df[chosen_strain].replace(0, np.nan) / 100
+                    cond = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
+                    y = pd.Series(np.nan, index=df.index)
+                    y.loc[cond] = (
+                        df.loc[cond, chosen_stress] / eps.loc[cond]
+                        + df.loc[cond, chosen_stress]
+                    )
+                lbl = f.name if label_mode == "Filename" else f"{mix_key} - Sample{idx+1}"
+                ax.plot(
+                    x, y,
+                    color=plt.get_cmap("tab20").colors[idx % 20],
+                    label=lbl,
+                    linewidth=LINEWIDTH
+                )
+
+            ax.set_xlim(left=0)
+            ax.set_ylim(bottom=0)
+            ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
+            ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
+            ax.set_ylabel(
+                chosen_stress if metric == "Stress" else "MSV (MPa)",
+                fontsize=LABEL_FS
+            )
+            ax.tick_params(labelsize=TICK_FS)
+
+            handles, labels = ax.get_legend_handles_labels()
+            pairs = sorted(zip(labels, handles), key=lambda x: x[0])
+            sl, sh = zip(*pairs)
+            ax.legend(
+                sh, sl, title="Samples",
+                fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
+                loc="upper left", frameon=True, edgecolor="black"
+            )
+
+            pdf.savefig(fig)
+            plt.close(fig)
+
+    pdf_buffer.seek(0)
+    return pdf_buffer
+
+
+
+
 # ——— Custom CSS for tighter spacing around checkboxes & text inputs ———
 st.set_page_config(page_title="Instron Post-Processing Tool", layout="wide")
 
@@ -63,31 +127,133 @@ def _load_instron_csv(buffer):
     return pd.read_csv(StringIO(data_str))
 
 
+
 @st.cache_data
 def clean_instron_file(buffer):
     """
     1) Load buffer into a pandas DataFrame by scanning for the "Time" header.
     2) Convert every column to numeric (coercing errors → NaN).
+    3) Compute MSV = Stress/Strain + Stress, only where Stress > 0 and Displacement > 1 mm.
     """
-    # This will rewind and load the CSV content
+    # Rewind & load
     df = _load_instron_csv(buffer)
 
-    # Rename to your desired columns
-    df.columns = ["Time (s)", "Force (kN)", "Displacement (mm)", "Strain (%)", "Stress (MPa)"]
+    # Rename columns
+    df.columns = [
+        "Time (s)",
+        "Force (kN)",
+        "Displacement (mm)",
+        "Strain (%)",
+        "Stress (MPa)"
+    ]
 
-    # Ensure everything is numeric
+    # Coerce to numeric
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Compute MSV only under valid conditions
+    eps = df["Strain (%)"].replace(0, np.nan) / 100.0
+    cond = (df["Stress (MPa)"] > 0) & (df["Displacement (mm)"] > 1)
+    msv = pd.Series(np.nan, index=df.index)
+    msv.loc[cond] = df.loc[cond, "Stress (MPa)"] / eps.loc[cond] + df.loc[cond, "Stress (MPa)"]
+    df["MSV [MPa]"] = msv
 
     return df
 
 
 
-st.title("Instron Post-Processing Tool")
+# —— Helpers: equalize rows and average curves ——
+def equalize_dataframe_rows(dataframes):
+    """
+    Pad shorter DataFrames to the length of the longest one by repeating the last row.
+    """
+    max_rows = max(df.shape[0] for df in dataframes)
+    equalized = []
+    for df in dataframes:
+        if df.shape[0] < max_rows:
+            # create a DataFrame of the last row repeated
+            last = df.iloc[[-1]]
+            pads = pd.concat([last] * (max_rows - df.shape[0]), ignore_index=True)
+            df = pd.concat([df, pads], ignore_index=True)
+        equalized.append(df)
+    return equalized
+
+
+def average_stress_strain_curves(replicates):
+    """
+    replicates: list of lists of DataFrames (each sublist is one mix's replicates)
+    Returns:
+      averaged_dfs: list of DataFrames with ['Strain (%)','Stress (MPa)','MSV [MPa]']
+                   each truncated at the **mean** failure, plus one vertical drop
+      eq_dfs:      list of the equalized (trimmed & padded) replicates, if you still need them
+    """
+    averaged_dfs = []
+    eq_dfs = []
+
+    for replicate_set in replicates:
+        trimmed = []
+        failure_strains = []
+        failure_msvs    = []
+
+        # 1) Trim each replicate at its own peak‐stress
+        for df in replicate_set:
+            df = df[df['Strain (%)'] > 0].reset_index(drop=True)
+            i_max = df['Stress (MPa)'].idxmax()
+
+            # record each replicate's failure point
+            failure_strains.append(df.loc[i_max, 'Strain (%)'])
+            failure_msvs.append(   df.loc[i_max, 'MSV [MPa]']   )
+
+            trimmed.append(df.iloc[:i_max+1].reset_index(drop=True))
+
+        # 2) Equalize lengths so we can do a point‐wise mean
+        eq_set = equalize_dataframe_rows(trimmed)
+        eq_dfs.append(eq_set)
+
+        # 3) Compute the average curve
+        avg_strain = pd.concat([d['Strain (%)']   for d in eq_set], axis=1).mean(axis=1)
+        avg_stress = pd.concat([d['Stress (MPa)'] for d in eq_set], axis=1).mean(axis=1)
+        avg_msv    = pd.concat([d['MSV [MPa]']    for d in eq_set], axis=1).mean(axis=1)
+
+        avg_df = pd.DataFrame({
+            'Strain (%)':   avg_strain,
+            'Stress (MPa)': avg_stress,
+            'MSV [MPa]':    avg_msv
+        })
+
+        # 4) Compute the mean failure‐strain & mean failure‐MSV
+        mean_strain = np.mean(failure_strains)
+        mean_msv    = np.mean(failure_msvs)
+
+        # 5) Truncate the averaged curve at the mean_strain
+        if (avg_df['Strain (%)'] >= mean_strain).any():
+            cut = avg_df['Strain (%)'].ge(mean_strain).idxmax()
+            avg_df = avg_df.iloc[:cut+1].copy()
+
+        # 6) Append two points to create one vertical drop:
+        #    (mean_strain, mean_msv) → (mean_strain, 0)
+        drop_start = pd.DataFrame({
+            'Strain (%)':   [mean_strain],
+            'Stress (MPa)': [avg_df['Stress (MPa)'].iloc[-1]],
+            'MSV [MPa]':    [mean_msv]
+        })
+        drop_end = pd.DataFrame({
+            'Strain (%)':   [mean_strain],
+            'Stress (MPa)': [0.0],
+            'MSV [MPa]':    [0.0]
+        })
+
+        avg_df = pd.concat([avg_df, drop_start, drop_end], ignore_index=True)
+        averaged_dfs.append(avg_df)
+
+    return averaged_dfs, eq_dfs
+
+
 
 
 
 # ——— 1) Define mixes & upload samples ———
+st.title("Instron Post-Processing Tool")
 num_mixes = st.number_input("Enter number of mixes:", min_value=1, max_value=20, step=1, value=1)
 
 uploads = {}
@@ -138,91 +304,22 @@ tab_graph, tab_comp, tab_key = st.tabs(["Graph Interface", "Comparison Interace"
 TITLE_FS = 7
 LABEL_FS = 6
 TICK_FS  = 5
-LEGEND_FS = 4
-LEGEND_TITLE_FS = 5
+LEGEND_FS = 5
+LEGEND_TITLE_FS = 6
 LINEWIDTH = 1.5
 
 with tab_graph:
     st.subheader("Stress vs Strain — pick curves to plot")
 
-    # Three controls side-by-side: Metric, Label Mode, and PDF Download
     col1, col2, col3 = st.columns([1, 1, 1], gap="small")
     with col1:
-        metric = st.radio(
-            "Metric",
-            ["Stress", "MSV"],
-            horizontal=True,
-            key="metric_graph"
-        )
+        metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, key="metric_graph")
     with col2:
-        label_mode = st.radio(
-            "Legend labels",
-            ["Filename", "Nickname"],
-            horizontal=True,
-            key="label_mode"
-        )
+        label_mode = st.radio("Legend labels", ["Filename", "Nickname"], horizontal=True, key="label_mode")
     with col3:
         if st.button("📄 Download all as PDF"):
-            pdf_buffer = io.BytesIO()
-            with bpdf.PdfPages(pdf_buffer) as pdf:
-                for mix_key, files in uploads.items():
-                    if not files:
-                        continue
-                    fig, ax = plt.subplots(figsize=(3.7, 3.7), constrained_layout=True)
-                    ax.set_box_aspect(1)
-                    for idx, f in enumerate(files):
-                        df = clean_instron_file(f)
-                        x = df[chosen_strain]
-                        if metric == "Stress":
-                            y = df[chosen_stress]
-                        else:
-                            eps = df[chosen_strain].replace(0, np.nan) / 100
-                            cond = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
-                            y = pd.Series(np.nan, index=df.index)
-                            y.loc[cond] = (
-                                df.loc[cond, chosen_stress] / eps.loc[cond]
-                                + df.loc[cond, chosen_stress]
-                            )
-                        lbl = f.name if label_mode == "Filename" else f"{mix_key} - Sample{idx+1}"
-                        ax.plot(
-                            x, y,
-                            color=plt.get_cmap("tab20").colors[idx % 20],
-                            label=lbl, linewidth=LINEWIDTH
-                        )
-
-                    # Ensure axes start at zero
-                    ax.set_xlim(left=0)
-                    ax.set_ylim(bottom=0)
-
-                    # font sizes
-                    ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
-                    ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
-                    ax.set_ylabel(
-                        chosen_stress if metric == "Stress" else "MSV (MPa)",
-                        fontsize=LABEL_FS
-                    )
-                    ax.tick_params(labelsize=TICK_FS)
-
-                    handles, labels = ax.get_legend_handles_labels()
-                    pairs = sorted(zip(labels, handles), key=lambda x: x[0])
-                    sl, sh = zip(*pairs)
-                    ax.legend(
-                        sh, sl, title="Samples",
-                        fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
-                        loc="upper left",
-                        frameon=True, edgecolor="black"
-                    )
-
-                    pdf.savefig(fig)
-                    plt.close(fig)
-
-            pdf_buffer.seek(0)
-            st.download_button(
-                "⬇️ Download PDF",
-                data=pdf_buffer,
-                file_name="instron_all_mixes.pdf",
-                mime="application/pdf"
-            )
+            pdf_data = download_all_plots_as_pdf()
+            st.download_button("⬇️ Download PDF", data=pdf_data, file_name="instron_all_mixes.pdf", mime="application/pdf")
 
     st.markdown("---")
 
@@ -233,27 +330,44 @@ with tab_graph:
         fig, ax = plt.subplots(figsize=(3.5, 3.5), constrained_layout=True)
         ax.set_box_aspect(1)
 
-        for idx, f in enumerate(files):
-            df = clean_instron_file(f)
-            x = df[chosen_strain]
-            if metric == "Stress":
-                y = df[chosen_stress]
-            else:
-                eps = df[chosen_strain].replace(0, np.nan) / 100
-                cond = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
-                y = pd.Series(np.nan, index=df.index)
-                y.loc[cond] = (
-                    df.loc[cond, chosen_stress] / eps.loc[cond]
-                    + df.loc[cond, chosen_stress]
-                )
-            lbl = f.name if label_mode == "Filename" else f"{mix_key} - Sample{idx+1}"
-            ax.plot(x, y, color=plt.get_cmap("tab20").colors[idx % 20], label=lbl, linewidth=LINEWIDTH)
+        # — Clean & average —
+        dataframes = [clean_instron_file(f) for f in files]
+        averaged_dfs, _ = average_stress_strain_curves([dataframes])
+        avg_df = averaged_dfs[0]
 
-        # Ensure axes start at zero
+        # — Plot individual replicates —
+        for idx, df in enumerate(dataframes):
+            x = df[chosen_strain]
+            y = df[chosen_stress] if metric == "Stress" else df["MSV [MPa]"]
+            lbl = (
+                files[idx].name
+                if label_mode == "Filename"
+                else f"{mix_key} - Sample{idx+1}"
+            )
+            ax.plot(
+                x, y,
+                color=plt.get_cmap("tab20").colors[idx % 20],
+                linewidth=LINEWIDTH,
+                label=lbl
+            )
+
+        # — Plot averaged curve —
+        x_avg = avg_df[chosen_strain]
+        if metric == "Stress":
+            y_avg = avg_df[chosen_stress]
+        else:
+            y_avg = avg_df["MSV [MPa]"]
+        ax.plot(
+            x_avg, y_avg,
+            color="black",
+            linestyle="--",
+            linewidth=LINEWIDTH,
+            label="Average"
+        )
+
+        # — Axes & legend styling —
         ax.set_xlim(left=0)
         ax.set_ylim(bottom=0)
-
-        # font sizes
         ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
         ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
         ax.set_ylabel(
@@ -287,12 +401,22 @@ with tab_graph:
 with tab_comp:
     st.subheader("Comparison — select representative samples per mix")
 
-    # Allow user to pick one sample per mix
+    # 1) Precompute averages
+    average_dfs = {}
+    for mix_key, files in uploads.items():
+        if not files:
+            continue
+        # load & average this mix
+        dfs = [clean_instron_file(f) for f in files]
+        averaged, _ = average_stress_strain_curves([dfs])
+        average_dfs[mix_key] = averaged[0]
+
+    # 2) Build selectboxes with "Average" first
     compare = {}
     for mix_key, files in uploads.items():
         if not files:
             continue
-        options = [f.name for f in files]
+        options = ["Average"] + [f.name for f in files]
         sel = st.selectbox(
             f"{mix_key} sample to compare",
             options,
@@ -300,64 +424,50 @@ with tab_comp:
         )
         compare[mix_key] = sel
 
-    # Metric radio (same as in graph)
     metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, key="comp_metric")
 
-    # Once every mix has a selection, plot them together
+    # 3) Once every mix has a selection, plot them together
     if len(compare) == len([k for k in uploads if uploads[k]]):
         fig, ax = plt.subplots(figsize=(3.5, 3.5), constrained_layout=True)
         ax.set_box_aspect(1)
         palette = plt.get_cmap("tab20").colors
 
         for idx, mix_key in enumerate(compare):
-            fname = compare[mix_key]
-            # find the corresponding UploadedFile object
-            fobj = next(f for f in uploads[mix_key] if f.name == fname)
-            df = clean_instron_file(fobj)
-            x = df[chosen_strain]
-            if metric == "Stress":
-                y = df[chosen_stress]
+            choice = compare[mix_key]
+            if choice == "Average":
+                df = average_dfs[mix_key]
+                label = f"{mix_key}: Average"
             else:
-                eps = df[chosen_strain].replace(0, np.nan) / 100.0
-                cond = (df[chosen_stress] > 0) & (df["Displacement (mm)"] > 1)
-                y = pd.Series(np.nan, index=df.index)
-                y.loc[cond] = (
-                    df.loc[cond, chosen_stress] / eps.loc[cond]
-                    + df.loc[cond, chosen_stress]
-                )
+                # find the corresponding UploadedFile
+                fobj = next(f for f in uploads[mix_key] if f.name == choice)
+                df = clean_instron_file(fobj)
+                label = f"{mix_key}: {choice}"
 
+            x = df[chosen_strain]
+            y = df[chosen_stress] if metric == "Stress" else df["MSV [MPa]"]
             ax.plot(
-                x,
-                y,
+                x, y,
                 color=palette[idx % len(palette)],
-                label=f"{mix_key}: {fname}",
+                label=label,
                 linewidth=LINEWIDTH
             )
 
-        # Force axes to start at zero
+        # styling as before…
         ax.set_xlim(left=0)
         ax.set_ylim(bottom=0)
-
-        # sort legend
         handles, labels = ax.get_legend_handles_labels()
         pairs = sorted(zip(labels, handles), key=lambda x: x[0])
         sorted_labels, sorted_handles = zip(*pairs)
         leg = ax.legend(
-            sorted_handles,
-            sorted_labels,
-            title="Samples",
-            fontsize=LEGEND_FS,
-            title_fontsize=LEGEND_TITLE_FS,
-            loc="upper left",
-            frameon=True,
-            edgecolor="black",
+            sorted_handles, sorted_labels,
+            title="Samples", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
+            loc="upper left", frameon=True, edgecolor="black"
         )
         leg.get_frame().set_linewidth(0.5)
-
         ax.set_title(f"Comparison: {metric} vs Strain", fontsize=TITLE_FS)
         ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
         ax.set_ylabel(
-            chosen_stress if metric == "Stress" else "MSV (MPa)",
+            chosen_stress if metric=="Stress" else "MSV (MPa)",
             fontsize=LABEL_FS
         )
         ax.tick_params(labelsize=TICK_FS)
@@ -367,7 +477,6 @@ with tab_comp:
 
     else:
         st.info("✅ Please select one sample for each mix to compare.")
-
 
 
 
