@@ -6,7 +6,7 @@ from matplotlib.ticker import LogLocator, LogFormatter, FuncFormatter
 from io import StringIO
 import io
 import streamlit as st
-import matplotlib.backends.backend_pdf as bpdf
+from matplotlib.backends.backend_pdf import PdfPages
 
 
 
@@ -75,21 +75,6 @@ def download_all_plots_as_pdf():
 
 # ——— Custom CSS for tighter spacing around checkboxes & text inputs ———
 st.set_page_config(page_title="Instron Post-Processing Tool", layout="wide")
-
-st.markdown("""
-<style>
-  /* Reduce bottom margin on each checkbox container */
-  .stCheckbox {
-    margin-bottom: 4px !important;
-    padding-bottom: 0px !important;
-  }
-  /* Reduce top margin on each text input container */
-  .stTextInput {
-    margin-top: 0px !important;
-    margin-bottom: 12px !important;
-  }
-</style>
-""", unsafe_allow_html=True)
 
 
 def _load_instron_csv(buffer):
@@ -304,80 +289,21 @@ tab_graph, tab_comp, tab_key = st.tabs(["Graph Interface", "Comparison Interace"
 TITLE_FS = 7
 LABEL_FS = 6
 TICK_FS  = 5
-LEGEND_FS = 4.3
+LEGEND_FS = 4.5
 LEGEND_TITLE_FS = 5.5
 LINEWIDTH = 1.5
 
-with tab_graph:
-    st.subheader("Stress vs Strain — pick curves to plot")
-
-    col1, col2, col3 = st.columns([1, 1, 1], gap="small")
-    with col1:
-        metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, key="metric_graph")
-    with col2:
-        label_mode = st.radio("Legend labels", ["Filename", "Nickname"], horizontal=True, key="label_mode")
-    with col3:
-        if st.button("📄 Download all as PDF"):
-            pdf_data = download_all_plots_as_pdf()
-            st.download_button("⬇️ Download PDF", data=pdf_data, file_name="instron_all_mixes.pdf", mime="application/pdf")
-
-    st.markdown("---")
-
-    for mix_key, files in uploads.items():
-        if not files:
-            continue
-
-        fig, ax = plt.subplots(figsize=(3.5, 3.5), constrained_layout=True)
-        ax.set_box_aspect(1)
-
-        # — Clean & average —
-        dataframes = [clean_instron_file(f) for f in files]
-        averaged_dfs, _ = average_stress_strain_curves([dataframes])
-        avg_df = averaged_dfs[0]
-
-        # — Plot individual replicates —
-        for idx, df in enumerate(dataframes):
-            x = df[chosen_strain]
-            y = df[chosen_stress] if metric == "Stress" else df["MSV [MPa]"]
-            lbl = (
-                files[idx].name
-                if label_mode == "Filename"
-                else f"{mix_key} - Sample{idx+1}"
-            )
-            ax.plot(
-                x, y,
-                color=plt.get_cmap("tab20").colors[idx % 20],
-                linewidth=LINEWIDTH,
-                label=lbl
-            )
-
-        # — Plot averaged curve —
-        x_avg = avg_df[chosen_strain]
-        if metric == "Stress":
-            y_avg = avg_df[chosen_stress]
-        else:
-            y_avg = avg_df["MSV [MPa]"]
-        ax.plot(
-            x_avg, y_avg,
-            color="black",
-            linestyle="--",
-            linewidth=LINEWIDTH,
-            label="Average"
-        )
-
-        # — Axes & legend styling —
-        ax.set_xlim(left=0)
-        ax.set_ylim(bottom=0)
-        ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
-        ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
-        ax.set_ylabel(
-            chosen_stress if metric == "Stress" else "MSV (MPa)",
-            fontsize=LABEL_FS
-        )
-        ax.tick_params(axis="both", which="major", labelsize=TICK_FS)
-
-        handles, labels = ax.get_legend_handles_labels()
-        pairs = sorted(zip(labels, handles), key=lambda x: x[0])
+### Helper: DRY styling for both graphs and comparison
+def style_axes(ax, title, xlabel, ylabel):
+    ax.set_xlim(0)
+    ax.set_ylim(0)
+    ax.set_title(title, fontsize=TITLE_FS)
+    ax.set_xlabel(xlabel, fontsize=LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=LABEL_FS)
+    ax.tick_params(axis="both", which="major", labelsize=TICK_FS)
+    handles, labels = ax.get_legend_handles_labels()
+    pairs = sorted(zip(labels, handles), key=lambda x: x[0])
+    if pairs:
         sorted_labels, sorted_handles = zip(*pairs)
         leg = ax.legend(
             sorted_handles,
@@ -387,96 +313,143 @@ with tab_graph:
             title_fontsize=LEGEND_TITLE_FS,
             loc="upper left",
             frameon=True,
-            edgecolor="black",
+            edgecolor="black"
         )
         leg.get_frame().set_linewidth(0.5)
 
-        plt.tight_layout()
-        st.pyplot(fig, use_container_width=False)
-        st.markdown("---")
 
 
+# ——— Graph Interface ———
+with tab_graph:
+    st.subheader("Stress vs Strain — pick curves to plot")
 
-
-with tab_comp:
-    st.subheader("Comparison — select representative samples per mix")
-
-    # 1) Precompute averages
+    # — 0) Precompute averages for each mix so we can reuse them —
     average_dfs = {}
     for mix_key, files in uploads.items():
         if not files:
             continue
-        # load & average this mix
         dfs = [clean_instron_file(f) for f in files]
-        averaged, _ = average_stress_strain_curves([dfs])
-        average_dfs[mix_key] = averaged[0]
+        avg_list, _ = average_stress_strain_curves([dfs])
+        average_dfs[mix_key] = avg_list[0]
 
-    # 2) Build selectboxes with "Average" first
-    compare = {}
+    col1, col2, col3 = st.columns([1,1,1], gap="small")
+    with col1:
+        metric = st.radio("Metric", ["Stress","MSV"], horizontal=True, key="metric_graph")
+    with col2:
+        label_mode = st.radio("Legend labels", ["Filename","Nickname"], horizontal=True, key="label_mode")
+        
+    show_avg = st.checkbox("Show average", value=True, key="show_avg_graph")
+    st.markdown("---")
+
+    # collect figures for PDF
+    graph_figs = []
+
     for mix_key, files in uploads.items():
         if not files:
             continue
-        options = ["Average"] + [f.name for f in files]
-        sel = st.selectbox(
-            f"{mix_key} sample to compare",
-            options,
-            key=f"comp_{mix_key}"
-        )
-        compare[mix_key] = sel
 
-    metric = st.radio("Metric", ["Stress", "MSV"], horizontal=True, key="comp_metric")
-
-    # 3) Once every mix has a selection, plot them together
-    if len(compare) == len([k for k in uploads if uploads[k]]):
-        fig, ax = plt.subplots(figsize=(3.5, 3.5), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(3.5,3.5), constrained_layout=True)
         ax.set_box_aspect(1)
-        palette = plt.get_cmap("tab20").colors
 
-        for idx, mix_key in enumerate(compare):
-            choice = compare[mix_key]
-            if choice == "Average":
-                df = average_dfs[mix_key]
-                label = f"{mix_key}: Average"
-            else:
-                # find the corresponding UploadedFile
-                fobj = next(f for f in uploads[mix_key] if f.name == choice)
-                df = clean_instron_file(fobj)
-                label = f"{mix_key}: {choice}"
-
+        # load and plot replicates
+        dfs = [clean_instron_file(f) for f in files]
+        for idx, df in enumerate(dfs):
             x = df[chosen_strain]
-            y = df[chosen_stress] if metric == "Stress" else df["MSV [MPa]"]
-            ax.plot(
-                x, y,
-                color=palette[idx % len(palette)],
-                label=label,
-                linewidth=LINEWIDTH
-            )
+            y = df[chosen_stress] if metric=="Stress" else df["MSV [MPa]"]
+            raw = files[idx].name.rsplit('.',1)[0]
+            lbl = raw if label_mode=="Filename" else f"{mix_key} - Sample{idx+1}"
+            ax.plot(x,y, color=plt.get_cmap("tab20").colors[idx%20], linewidth=LINEWIDTH, label=lbl)
 
-        # styling as before…
-        ax.set_xlim(left=0)
-        ax.set_ylim(bottom=0)
-        handles, labels = ax.get_legend_handles_labels()
-        pairs = sorted(zip(labels, handles), key=lambda x: x[0])
-        sorted_labels, sorted_handles = zip(*pairs)
-        leg = ax.legend(
-            sorted_handles, sorted_labels,
-            title="Samples", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
-            loc="upper left", frameon=True, edgecolor="black"
-        )
-        leg.get_frame().set_linewidth(0.5)
-        ax.set_title(f"Comparison: {metric} vs Strain", fontsize=TITLE_FS)
-        ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
-        ax.set_ylabel(
-            chosen_stress if metric=="Stress" else "MSV (MPa)",
-            fontsize=LABEL_FS
-        )
-        ax.tick_params(labelsize=TICK_FS)
+        # plot average if toggled
+        if show_avg:
+            avg_df = average_dfs[mix_key]  # or recompute: average_stress_strain_curves([dfs])[0][0]
+            x_avg = avg_df[chosen_strain]
+            y_avg = avg_df[chosen_stress] if metric=="Stress" else avg_df["MSV [MPa]"]
+            ax.plot(x_avg,y_avg, color="black", linestyle="--", linewidth=LINEWIDTH*0.7, label="Average")
 
-        plt.tight_layout()
+        # style and display
+        style_axes(
+            ax,
+            title=f"{mix_key}: {metric} vs Strain",
+            xlabel=chosen_strain,
+            ylabel=chosen_stress if metric=="Stress" else "MSV (MPa)"
+        )
         st.pyplot(fig, use_container_width=False)
+        st.markdown("---")
 
+        graph_figs.append(fig)
+
+    # generate PDF from collected figures on demand
+    if graph_figs:
+        pdf_buffer = io.BytesIO()
+        with PdfPages(pdf_buffer) as pdf:
+            for fig in graph_figs:
+                pdf.savefig(fig)
+        pdf_buffer.seek(0)
+        st.download_button(label="⬇️ Download PDF", data=pdf_buffer, file_name="instron_all_mixes.pdf", mime="application/pdf")
+
+
+
+# ——— Comparison Interface ———
+with tab_comp:
+    st.subheader("Comparison — select representative samples per mix")
+
+    # precompute averages
+    average_dfs = {}
+    for mix_key, files in uploads.items():
+        if not files: continue
+        dfs = [clean_instron_file(f) for f in files]
+        avg, _ = average_stress_strain_curves([dfs])
+        average_dfs[mix_key] = avg[0]
+
+    # build select + checkbox per mix
+    compare = {}
+    include = {}
+    for mix_key, files in uploads.items():
+        if not files: continue
+        col_sel, col_chk = st.columns([4,0.5], gap="small")
+        options = ["Average"] + [f.name for f in files]
+        sel = col_sel.selectbox(f"{mix_key}:", options, key=f"comp_{mix_key}")
+        chk = col_chk.checkbox("Plot", True, key=f"inc_{mix_key}")
+        compare[mix_key] = sel
+        include[mix_key] = chk
+
+    metric_cmp = st.radio("Metric", ["Stress","MSV"], horizontal=True, key="comp_metric")
+
+    # ensure selection and at least one plot
+    if len(compare)==len([k for k in uploads if uploads[k]]):
+        plotted = [k for k,v in include.items() if v]
+        if not plotted:
+            st.info("✅ Tick at least one ‘Plot’ box to see a comparison.")
+        else:
+            fig, ax = plt.subplots(figsize=(3.5,3.5), constrained_layout=True)
+            ax.set_box_aspect(1)
+            palette = plt.get_cmap("tab20").colors
+
+            for idx, mix_key in enumerate(compare):
+                if not include[mix_key]: continue
+                choice = compare[mix_key]
+                raw = choice if choice=="Average" else choice.rsplit('.',1)[0]
+                label = f"{mix_key}: {raw}"
+                if choice=="Average":
+                    df = average_dfs[mix_key]
+                else:
+                    fobj = next(f for f in uploads[mix_key] if f.name==choice)
+                    df = clean_instron_file(fobj)
+                x = df[chosen_strain]
+                y = df[chosen_stress] if metric_cmp=="Stress" else df["MSV [MPa]"]
+                ax.plot(x,y, color=palette[idx%len(palette)], linewidth=LINEWIDTH, label=label)
+
+            style_axes(
+                ax,
+                title=f"Comparison: {metric_cmp} vs Strain",
+                xlabel=chosen_strain,
+                ylabel=chosen_stress if metric_cmp=="Stress" else "MSV (MPa)"
+            )
+            st.pyplot(fig, use_container_width=False)
     else:
         st.info("✅ Please select one sample for each mix to compare.")
+
 
 
 
