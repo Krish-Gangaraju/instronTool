@@ -49,10 +49,7 @@ def download_all_plots_as_pdf():
             ax.set_ylim(bottom=0)
             ax.set_title(f"{mix_key}: {metric} vs Strain", fontsize=TITLE_FS)
             ax.set_xlabel(chosen_strain, fontsize=LABEL_FS)
-            ax.set_ylabel(
-                chosen_stress if metric == "Stress" else "MSV (MPa)",
-                fontsize=LABEL_FS
-            )
+            ax.set_ylabel(chosen_stress if metric == "Stress" else "MSV (MPa)", fontsize=LABEL_FS)
             ax.tick_params(labelsize=TICK_FS)
 
             handles, labels = ax.get_legend_handles_labels()
@@ -305,16 +302,8 @@ def style_axes(ax, title, xlabel, ylabel):
     pairs = sorted(zip(labels, handles), key=lambda x: x[0])
     if pairs:
         sorted_labels, sorted_handles = zip(*pairs)
-        leg = ax.legend(
-            sorted_handles,
-            sorted_labels,
-            title="Samples",
-            fontsize=LEGEND_FS,
-            title_fontsize=LEGEND_TITLE_FS,
-            loc="upper left",
-            frameon=True,
-            edgecolor="black"
-        )
+        leg = ax.legend(sorted_handles, sorted_labels, title="Samples", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
+            loc="upper left", frameon=True, edgecolor="black")
         leg.get_frame().set_linewidth(0.5)
 
 
@@ -368,12 +357,7 @@ with tab_graph:
             ax.plot(x_avg,y_avg, color="black", linestyle="--", linewidth=LINEWIDTH*0.7, label="Average")
 
         # style and display
-        style_axes(
-            ax,
-            title=f"{mix_key}: {metric} vs Strain",
-            xlabel=chosen_strain,
-            ylabel=chosen_stress if metric=="Stress" else "MSV (MPa)"
-        )
+        style_axes(ax, title=f"{mix_key}: {metric} vs Strain", xlabel="Strain [%]", ylabel="Stress [MPa]" if metric=="Stress" else "MSV [MPa]")
         st.pyplot(fig, use_container_width=False)
         st.markdown("---")
 
