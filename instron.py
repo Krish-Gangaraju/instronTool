@@ -269,14 +269,8 @@ if not strain_candidates or not stress_candidates:
     st.error("❌ Could not detect both strain & stress columns.")
     st.stop()
 
-chosen_strain = strain_candidates[0] if len(strain_candidates)==1 else st.selectbox(
-    "Choose X (strain) column:",
-    sorted(strain_candidates)
-)
-chosen_stress = stress_candidates[0] if len(stress_candidates)==1 else st.selectbox(
-    "Choose Y (stress) column:",
-    sorted(stress_candidates)
-)
+chosen_strain = strain_candidates[0] if len(strain_candidates)==1 else st.selectbox("Choose X (strain) column:", sorted(strain_candidates))
+chosen_stress = stress_candidates[0] if len(stress_candidates)==1 else st.selectbox("Choose Y (stress) column:", sorted(stress_candidates))
 
 tab_graph, tab_comp, tab_key = st.tabs(["Graph Interface", "Comparison Interace", "Key Values"])
 
@@ -325,8 +319,10 @@ with tab_graph:
     with col1:
         metric = st.radio("Metric", ["Stress","MSV"], horizontal=True, key="metric_graph")
     with col2:
+        show_grid = st.radio("Grid", ["On","Off"], horizontal=True, key="grid_toggle")
+    with col3:
         label_mode = st.radio("Legend labels", ["Filename","Nickname"], horizontal=True, key="label_mode")
-        
+
     show_avg = st.checkbox("Show average", value=True, key="show_avg_graph")
     st.markdown("---")
 
@@ -336,6 +332,10 @@ with tab_graph:
     for mix_key, files in uploads.items():
         if not files:
             continue
+
+        # text input for custom title
+        default_title = f"{mix_key}: {metric} vs Strain"
+        title_text = st.text_input(f"Title for {mix_key}", value=default_title, key=f"title_{mix_key}")
 
         fig, ax = plt.subplots(figsize=(3.5,3.5), constrained_layout=True)
         ax.set_box_aspect(1)
@@ -347,17 +347,29 @@ with tab_graph:
             y = df[chosen_stress] if metric=="Stress" else df["MSV [MPa]"]
             raw = files[idx].name.rsplit('.',1)[0]
             lbl = raw if label_mode=="Filename" else f"{mix_key} - Sample{idx+1}"
-            ax.plot(x,y, color=plt.get_cmap("tab20").colors[idx%20], linewidth=LINEWIDTH, label=lbl)
+            ax.plot(x, y,
+                    color=plt.get_cmap("tab20").colors[idx%20],
+                    linewidth=LINEWIDTH,
+                    label=lbl)
 
         # plot average if toggled
         if show_avg:
-            avg_df = average_dfs[mix_key]  # or recompute: average_stress_strain_curves([dfs])[0][0]
+            avg_df = average_dfs[mix_key]
             x_avg = avg_df[chosen_strain]
             y_avg = avg_df[chosen_stress] if metric=="Stress" else avg_df["MSV [MPa]"]
-            ax.plot(x_avg,y_avg, color="black", linestyle="--", linewidth=LINEWIDTH*0.7, label="Average")
+            ax.plot(x_avg, y_avg,
+                    color="black", linestyle="--",
+                    linewidth=LINEWIDTH*0.7,
+                    label="Average")
+
+        # toggle grid
+        ax.grid(True if show_grid == "On" else False)
 
         # style and display
-        style_axes(ax, title=f"{mix_key}: {metric} vs Strain", xlabel="Strain [%]", ylabel="Stress [MPa]" if metric=="Stress" else "MSV [MPa]")
+        style_axes(ax,
+                   title=title_text,
+                   xlabel="Strain [%]",
+                   ylabel="Stress [MPa]" if metric=="Stress" else "MSV [MPa]")
         st.pyplot(fig, use_container_width=False)
         st.markdown("---")
 
@@ -370,7 +382,13 @@ with tab_graph:
             for fig in graph_figs:
                 pdf.savefig(fig)
         pdf_buffer.seek(0)
-        st.download_button(label="⬇️ Download PDF", data=pdf_buffer, file_name="instron_all_mixes.pdf", mime="application/pdf")
+        st.download_button(
+            label="⬇️ Download PDF",
+            data=pdf_buffer,
+            file_name="instron_all_mixes.pdf",
+            mime="application/pdf"
+        )
+
 
 
 
@@ -436,9 +454,7 @@ with tab_comp:
 
 
 
-
-
-
+# ——— Key Value Interface ———
 with tab_key:
     st.subheader("Failure & M-Point Averages by Mix")
 
