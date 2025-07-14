@@ -1,8 +1,5 @@
-# Instron Post-Processing Tool
-
 Welcome to the **Instron Post-Processing Tool**, a Streamlit application designed to help you analyze mechanical test data without any coding! This guide will walk you through:
 
-- 🔧 **Installation & Launch**
 - 🖥️ **User Interface Overview**
 - 🔢 **Step 1: Define Mixes & Upload Samples**
 - 📊 **Step 2: Choose Columns**
@@ -12,30 +9,6 @@ Welcome to the **Instron Post-Processing Tool**, a Streamlit application designe
 - 💾 **Download Options**
 - 💡 **Tips & Best Practices**
 
----
-
-## 🔧 Installation & Launch
-
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/your-org/instron-post-processing-tool.git
-   cd instron-post-processing-tool
-   ```
-
-2. **Install Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Run the App**
-   ```bash
-   streamlit run app.py
-   ```
-
-4. **Open in Browser**
-   Go to `http://localhost:8501` to start using the tool.
-
----
 
 ## 🖥️ User Interface Overview
 
